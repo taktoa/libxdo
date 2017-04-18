@@ -5,9 +5,12 @@
 {-# LANGUAGE ForeignFunctionInterface   #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RecordWildCards            #-}
+{-# LANGUAGE TupleSections              #-}
 
 module System.XDo.Internal where
 
+import           Control.Concurrent         (threadDelay)
+import           Control.Monad              (void)
 import           Control.Monad.State.Strict
 
 import           Data.Word
@@ -19,6 +22,7 @@ import           Foreign.C.String
 import           Foreign.ForeignPtr
 import           Foreign.Ptr
 import           Foreign.Storable
+import           Foreign.Marshal.Alloc
 
 import qualified Graphics.X11.Types         as X11
 import qualified Graphics.X11.Xlib.Types    as X11
@@ -120,6 +124,28 @@ instance Storable CharCodeMap where
     {# set charcodemap_t.needs_binding #} p (if ccmNeedsBinding then 1 else 0)
 
 
+lissajousXDM :: XDM ()
+lissajousXDM = do (w, h) <- getViewportDimensions scr
+                  let (w', h') = (fromIntegral w / 2.0, fromIntegral h / 2.0)
+                  let transform (x, y) = (w' * (1.0 + x), h' * (1.0 - y))
+                  let move :: Float -> Float -> XDM ()
+                      move x y = let (x', y') = transform (x, y)
+                                 in void (moveMouse (round x') (round y') scr)
+                  go move 0.0
+  where
+    go :: (Float -> Float -> XDM ()) -> Float -> XDM ()
+    go move t = if t > 10000.0
+                then pure ()
+                else do let x = cos (t * a)
+                        let y = sin (t * b)
+                        move x y
+                        liftIO $ threadDelay (round (dt * 100000.0))
+                        go move (t + dt)
+
+    a, b, dt :: Float
+    (a, b) = (5.0, 4.0)
+    dt = 0.0005
+    scr = 0
 
 withXDC' :: (NFData a) => String -> XDM a -> IO a
 withXDC' display m = withCString display $ \cs -> do
@@ -129,8 +155,38 @@ withXDC' display m = withCString display $ \cs -> do
   pure result
 
 moveMouse :: XPos -> YPos -> ScreenID -> XDM RetVal
-moveMouse x y s = do xdc <- get
-                     liftIO $ c_move_mouse xdc x y s
+moveMouse x y screen = do
+  xdc <- get
+  liftIO $ c_move_mouse xdc x y screen
+
+getViewport :: ScreenID -> XDM (XPos, YPos, Width, Height)
+getViewport screen = do
+  (x, y) <- getDesktopViewport
+  (w, h) <- getViewportDimensions screen
+  pure (x, y, w, h)
+
+getDesktopViewport :: XDM (XPos, YPos)
+getDesktopViewport = get >>= \xdc -> liftIO $ do
+  x_ret <- malloc
+  y_ret <- malloc
+  c_get_desktop_viewport xdc x_ret y_ret
+  x <- peek x_ret
+  y <- peek y_ret
+  free x_ret
+  free y_ret
+  pure (x, y)
+
+getViewportDimensions :: ScreenID -> XDM (Width, Height)
+getViewportDimensions screen = get >>= \xdc -> liftIO $ do
+  w_ret <- malloc
+  h_ret <- malloc
+  c_get_viewport_dimensions xdc w_ret h_ret screen
+  w <- peek w_ret
+  h <- peek h_ret
+  free w_ret
+  free h_ret
+  pure (w, h)
+
 
 ----------------------------- -- ^ xxx
 
